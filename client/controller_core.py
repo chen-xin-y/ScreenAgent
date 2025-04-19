@@ -19,6 +19,9 @@ from asyncvnc import Client
 from base import *
 from action import *
 
+import os
+import json
+
 class VNCFrame(QLabel):
     def __init__(self, parent, action_queue):
         super().__init__(parent)
@@ -420,6 +423,12 @@ class VNCWidget(QMainWindow):
         except Exception as e:
             print("[render] error:", e)
 
+        for fn in recall_functions:
+            try:
+                fn()
+            except Exception as e:
+                print("[render] recall_func error:", e)
+
         self.set_status_text()
         self.refreshing_screen=False
         self.refresh_timer.start()
@@ -428,8 +437,84 @@ class VNCWidget(QMainWindow):
         self.task_prompt = item.text()
         self.task_prompt_display.setText(self.task_prompt)
 
+    
+    ##################################
+    # newly added
+    ##################################
     def start_automaton(self):
-        self.automaton.start(task_prompt=self.task_prompt, video_width=self.video_width, video_height=self.video_height)
+        os.makedirs('result', exist_ok=True)
+        result_file = os.path.join('result', 'result.txt')
+        with open(result_file, 'w', encoding='utf-8'):
+            pass
+
+        self._pending_tasks = self.task_prompt_list.copy()
+        self._all_task_results = []
+        self._execute_next_task()
+
+    def _execute_next_task(self):
+        if not self._pending_tasks:
+            print("=== All tasks done ===")
+            for tr in self._all_task_results:
+                print(tr)
+            return
+        else:
+            print(self._pending_tasks)
+
+        task = self._pending_tasks.pop(0)
+        self.automaton.base_info['results'] = []
+
+        from action import KeyboardAction, WaitAction, KeyboardActionType
+        for _ in range(5):
+            close_action = KeyboardAction(
+                keyboard_action_type=KeyboardActionType.press,
+                keyboard_key=['Alt_L','F4']
+            )
+            self.action_queue.put(close_action)
+            self.action_queue.put(WaitAction(0.5))
+        
+        finish_state = self.automaton.machine.get_state('finish')
+        def one_shot_callback(*args, **kwargs):
+            res = self.automaton.base_info.get('results', [])
+            status = self.automaton.base_info.get('task_status', {'result': 'success'})
+            # 存入内存列表
+            self._all_task_results.append({
+                'task': task,
+                'results': res,
+                'task_status': status
+            })
+            write_result_to_file(task, res, status)
+
+            finish_state.on_enter.remove(one_shot_callback)
+            self._execute_next_task()
+
+        finish_state.on_enter.append(one_shot_callback)
+
+        os.makedirs('result', exist_ok=True)
+
+        def write_result_to_file(task, res, task_status):
+            record = {
+                'task': task,
+                'subtasks': res,
+                'task_status': task_status
+            }
+            total = len(self._all_task_results)
+            failed = sum(1 for tr in self._all_task_results if tr['task_status'].get('result') == 'failed')
+            success = total - failed
+
+            path = os.path.join('result', 'result.txt')
+            with open(path, 'a', encoding='utf-8') as f:
+                f.write(f"Task: {task}\n")
+                f.write(json.dumps(record, ensure_ascii=False) + '\n')
+                f.write(f"Summary: Total={total}, Success={success}, Failed={failed}\n\n")
+
+        self.automaton.start(
+            task_prompt=task,
+            video_width=self.video_width,
+            video_height=self.video_height
+        )
+
+    ##################################
+
 
     def execute_actions(self, request_id, actions, recall_func):
         # receive a list of actions from other components, execute them

@@ -1,4 +1,4 @@
-import os
+import os, re
 from typing import Callable
 from transitions import Machine, State
 from jinja2 import Template as JinjaTemplate
@@ -133,6 +133,23 @@ class Evaluating(BaseState):
         self.automaton.ask_llm(prompt, self.automaton.after_action_screen, self.after_evaluate)
 
     def after_evaluate(self, actions, evaluate_update_subtask_index=True):
+        #################################
+        # newly added
+        #################################
+        task_name = self.automaton.base_info.get("task_prompt", "unknown_task")
+        safe_task = task_name.replace(" ", "_")
+        dir_path = os.path.join("result", safe_task)
+        os.makedirs(dir_path, exist_ok=True)
+        idx = self.automaton.current_task_index
+        count = self.automaton.retry_counts.get(idx, 0) + 1
+        filename = f"sub{idx}_try{count}.png"
+        try:
+            screenshot = self.automaton.vncwidget.get_now_screenshot()
+            screenshot.save(os.path.join(dir_path, filename))
+        except Exception as e:
+            print(f"[Automaton] Screenshot Fail: {e}")
+        ###################################
+        
         found_result = None
         for result in actions:
             if isinstance(result, EvaluateSubTaskAction):
@@ -148,6 +165,19 @@ class Evaluating(BaseState):
         else:
             if found_result.situation is not None:
                 if found_result.situation == "sub_task_success":
+                    
+                    ################################
+                    # newly added
+                    ################################
+                    idx = self.automaton.current_task_index
+                    tries = self.automaton.retry_counts.get(idx, 0) + 1
+                    self.automaton.base_info['results'].append({
+                        'task': self.automaton.current_task,
+                        'tries': tries,
+                        'result': 'success'
+                    })
+                    ################################
+
                     print("[Automaton:Evaluating] After Evaluating, to next_subtask")
                     if evaluate_update_subtask_index:
                         self.automaton.current_task_index += 1
@@ -160,10 +190,26 @@ class Evaluating(BaseState):
                         if self.automaton.auto_transitions:
                             self.automaton.next_subtask()
                 elif found_result.situation == "need_retry":
-                    print("[Automaton:Evaluating] After Evaluating, to need retry this subtask")
-                    self.automaton.advice = found_result.advice
-                    if self.automaton.auto_transitions:
-                        self.automaton.retry_current_subtask()
+                    ################################
+                    # newly added
+                    ################################
+                    idx = self.automaton.current_task_index
+                    count = self.automaton.retry_counts[idx] = self.automaton.retry_counts.get(idx, 0) + 1
+                    if count > 5:
+                        self.automaton.base_info['task_status'] = {
+                            'tries': count,
+                            'result': 'failed'
+                        }
+                        if self.automaton.auto_transitions:
+                            self.automaton.to_finish()
+                    else:
+                        self.automaton.advice = found_result.advice
+                    #############################
+
+                        print("[Automaton:Evaluating] After Evaluating, to need retry this subtask")
+                        self.automaton.advice = found_result.advice
+                        if self.automaton.auto_transitions:
+                            self.automaton.retry_current_subtask()
 
                 elif found_result.situation == "need_reformulate":
                     print("[Automaton:Evaluating] After Evaluating, to need_reformulate")
@@ -237,6 +283,13 @@ class Automaton:
 
         self.advice = None
         self.base_info = {}
+        
+        ################################
+        # newly added
+        ################################
+        self.retry_counts = {}
+        self.base_info['results'] = []
+        ################################
 
     def set_auto_transitions(self, auto_transitions: bool):
         self.auto_transitions = auto_transitions
@@ -269,6 +322,13 @@ class Automaton:
         self.after_action_screen = None
 
         self.advice = None
+
+        ################################
+        # newly added
+        ################################
+        self.retry_counts = {}
+        self.base_info['results'] = []
+        ################################
 
         self.start_planning()
 
